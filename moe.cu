@@ -174,7 +174,7 @@ std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g,
 
     auto topk_indices = torch::empty({N, k}, opt_int);
     auto topk_weights = torch::empty({N, k}, opt_flt);
-    auto histogram = torch::zeros({E}, opt_int);
+    auto histogram = torch::empty({E}, opt_int);
     auto offsets = torch::empty({E}, opt_int);
     auto write_pointers = torch::empty({E}, opt_int);
     
