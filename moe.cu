@@ -90,11 +90,17 @@ __global__ void expert_histogram_kernel(const int* __restrict__ topk_indices, in
 }
 
 // --- 4. Prefix Sum Kernel ---
-__global__ void exclusive_prefix_sum_kernel(const int* __restrict__ histogram, int* __restrict__ offsets, int E) {
+__global__ void exclusive_prefix_sum_kernel(
+    const int* __restrict__ histogram, 
+    int* __restrict__ offsets, 
+    int* __restrict__ write_pointers, 
+    int E
+) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int sum = 0;
         for (int i = 0; i < E; i++) {
             offsets[i] = sum;
+            write_pointers[i] = sum; 
             sum += histogram[i];
         }
     }
@@ -181,7 +187,14 @@ std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g,
     );
 
     expert_histogram_kernel<<<(total + 255)/256, 256>>>(topk_indices.data_ptr<int>(), histogram.data_ptr<int>(), total);
-    exclusive_prefix_sum_kernel<<<1, 1>>>(histogram.data_ptr<int>(), offsets.data_ptr<int>(), E);
+    
+    auto write_pointers = torch::empty({E}, opt_int);
+    exclusive_prefix_sum_kernel<<<1, 1>>>(
+        histogram.data_ptr<int>(), 
+        offsets.data_ptr<int>(), 
+        write_pointers.data_ptr<int>(), 
+        E
+    );
 
     auto write_pointers = offsets.clone();
     
