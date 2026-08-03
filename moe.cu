@@ -176,10 +176,13 @@ std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g,
     auto topk_weights = torch::empty({N, k}, opt_flt);
     auto histogram = torch::zeros({E}, opt_int);
     auto offsets = torch::empty({E}, opt_int);
+    auto write_pointers = torch::empty({E}, opt_int);
     
     auto permuted_x = torch::empty({total, d_model}, opt_flt);
     auto coo_indices = torch::empty({total}, opt_int);
     auto coo_weights = torch::empty({total}, opt_flt);
+
+    cudaMemset(histogram.data_ptr<int>(), 0, E * sizeof(int));
 
     int wpb = 4;
     fused_moe_router_kernel<<<(N + wpb - 1)/wpb, wpb * 32>>>(
@@ -188,15 +191,12 @@ std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g,
 
     expert_histogram_kernel<<<(total + 255)/256, 256>>>(topk_indices.data_ptr<int>(), histogram.data_ptr<int>(), total);
     
-    auto write_pointers = torch::empty({E}, opt_int);
     exclusive_prefix_sum_kernel<<<1, 1>>>(
         histogram.data_ptr<int>(), 
         offsets.data_ptr<int>(), 
         write_pointers.data_ptr<int>(), 
         E
     );
-
-    auto write_pointers = offsets.clone();
     
     permute_kernel<<<total, 256>>>(
         x.data_ptr<float>(), topk_indices.data_ptr<int>(), topk_weights.data_ptr<float>(),
