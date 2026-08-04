@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-#include "mem_manager.h"
+#include "../src/include/mem_manager.h"
 
 #define MAX_K 8
 
