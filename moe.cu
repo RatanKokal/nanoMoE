@@ -161,7 +161,7 @@ __global__ void unpermute_kernel(
     }
 }
 
-// 1. PagedAttention Memory Fetch Kernel
+// 1. PagedAttention Memory Fetch Kernel (Vectorized float4)
 __global__ void paged_memory_fetch_kernel(
     const float* __restrict__ physical_kv_cache, 
     const int* __restrict__ block_tables,        
@@ -175,7 +175,7 @@ __global__ void paged_memory_fetch_kernel(
     if (global_idx >= total_tokens_to_fetch) return;
 
     int seq_len = max_blocks_per_seq * block_size;
-
+    
     int seq_idx = global_idx / seq_len;
     int token_in_seq = global_idx % seq_len;
 
@@ -185,13 +185,21 @@ __global__ void paged_memory_fetch_kernel(
     int table_index = (seq_idx * max_blocks_per_seq) + logical_block_idx;
     int physical_block_id = block_tables[table_index];
 
-    if (physical_block_id < 0) return; // Empty or unallocated block
+    if (physical_block_id < 0) return; 
 
     int memory_offset = (physical_block_id * block_size * head_dim) + (token_offset * head_dim);
     int out_offset = global_idx * head_dim;
 
-    for (int d = 0; d < head_dim; d++) {
-        output_tokens[out_offset + d] = physical_kv_cache[memory_offset + d];
+    // --- OPTIMIZATION: 128-bit Vectorized Reads ---
+    // Cast the raw float pointers to CUDA's native float4 vector types
+    int vec_dim = head_dim / 4;
+    const float4* vec_in = reinterpret_cast<const float4*>(physical_kv_cache + memory_offset);
+    float4* vec_out = reinterpret_cast<float4*>(output_tokens + out_offset);
+
+    // Force the compiler to unroll the loop, removing branch instructions
+    #pragma unroll
+    for (int d = 0; d < vec_dim; d++) {
+        vec_out[d] = vec_in[d];
     }
 }
 
