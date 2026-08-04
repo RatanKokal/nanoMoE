@@ -2,6 +2,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+#include "mem_manager.h"
+
 #define MAX_K 8
 
 // --- 1. Warp Primitives ---
@@ -159,9 +161,96 @@ __global__ void unpermute_kernel(
     }
 }
 
+// 1. PagedAttention Memory Fetch Kernel
+__global__ void paged_memory_fetch_kernel(
+    const float* __restrict__ physical_kv_cache, 
+    const int* __restrict__ block_tables,        
+    float* __restrict__ output_tokens,           
+    int max_blocks_per_seq,
+    int block_size,
+    int head_dim,
+    int total_tokens_to_fetch
+) {
+    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_idx >= total_tokens_to_fetch) return;
+
+    int seq_len = max_blocks_per_seq * block_size;
+
+    int seq_idx = global_idx / seq_len;
+    int token_in_seq = global_idx % seq_len;
+
+    int logical_block_idx = token_in_seq / block_size;
+    int token_offset = token_in_seq % block_size;
+
+    int table_index = (seq_idx * max_blocks_per_seq) + logical_block_idx;
+    int physical_block_id = block_tables[table_index];
+
+    if (physical_block_id < 0) return; // Empty or unallocated block
+
+    int memory_offset = (physical_block_id * block_size * head_dim) + (token_offset * head_dim);
+    int out_offset = global_idx * head_dim;
+
+    for (int d = 0; d < head_dim; d++) {
+        output_tokens[out_offset + d] = physical_kv_cache[memory_offset + d];
+    }
+}
+
 // ==========================================
 // PyTorch C++ Bindings
 // ==========================================
+
+// 1. The CPU Binder Function
+torch::Tensor prepare_block_tables_for_gpu(
+    const std::vector<BlockTable>& active_requests, 
+    int max_blocks_per_seq
+) {
+    int batch_size = active_requests.size();
+    
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    torch::Tensor block_table_tensor = torch::zeros({batch_size, max_blocks_per_seq}, options);
+    
+    int* flat_table = block_table_tensor.data_ptr<int>();
+
+    for (int b = 0; b < batch_size; b++) {
+        const auto& table = active_requests[b];
+        for (int i = 0; i < table.blocks.size(); i++) {
+            int index = (b * max_blocks_per_seq) + i;
+            flat_table[index] = table.blocks[i]->physical_block_id;
+        }
+    }
+
+    return block_table_tensor.to(torch::kCUDA, /*non_blocking=*/true);
+}
+
+// 2. The Python wrapper for the fetch kernel
+torch::Tensor paged_kv_fetch(
+    torch::Tensor physical_kv_cache,
+    torch::Tensor block_tables,
+    int batch_size,
+    int seq_len,
+    int block_size,
+    int head_dim
+) {
+    int max_blocks_per_seq = block_tables.size(1);
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(physical_kv_cache.device());
+    auto output_tokens = torch::empty({batch_size, seq_len, head_dim}, options);
+
+    int total_tokens = batch_size * seq_len;
+    int threads = 256;
+    int blocks = (total_tokens + threads - 1) / threads;
+
+    paged_memory_fetch_kernel<<<blocks, threads>>>(
+        physical_kv_cache.data_ptr<float>(),
+        block_tables.data_ptr<int>(),
+        output_tokens.data_ptr<float>(),
+        max_blocks_per_seq,
+        block_size,
+        head_dim,
+        total_tokens
+    );
+
+    return output_tokens;
+}
 
 std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g, int k) {
     int N = x.size(0);
@@ -220,4 +309,5 @@ torch::Tensor unpermute(torch::Tensor expert_out, torch::Tensor coo_indices, tor
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("route_and_permute", &route_and_permute, "Forward routing and permute");
     m.def("unpermute", &unpermute, "Unpermute output");
+    m.def("paged_kv_fetch", &paged_kv_fetch, "PagedAttention KV cache fetch");
 }
