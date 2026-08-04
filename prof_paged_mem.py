@@ -23,7 +23,6 @@ def profile_fetch():
     )
     
     # 2. Simulate Extreme Fragmentation
-    # We assign completely random physical block IDs to every single logical block
     block_tables_cpu = torch.randint(
         0, num_physical_blocks, 
         (batch_size, max_blocks_per_seq), 
@@ -38,26 +37,42 @@ def profile_fetch():
         )
     torch.cuda.synchronize()
     
-    print("[Profile] Running Benchmark Loop...")
-    # Start the Nsight Systems profiler capture window
+    print("[Profile] Running Benchmark Loop with CUDA Events...")
     torch.cuda.cudart().cudaProfilerStart()
     
-    start_time = time.perf_counter()
-    iterations = 100
+    iterations = 1000  # Increased iterations for better percentile accuracy
+    events = []
     
     for _ in range(iterations):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         _ = custom_moe_cuda.paged_kv_fetch(
             physical_kv_cache, block_tables_gpu, batch_size, seq_len, block_size, head_dim
         )
+        end_event.record()
         
+        events.append((start_event, end_event))
+        
+    # Wait for all queued kernels to finish
     torch.cuda.synchronize()
-    end_time = time.perf_counter()
-    
-    # Stop the profiler
     torch.cuda.cudart().cudaProfilerStop()
     
-    avg_time_us = ((end_time - start_time) / iterations) * 1_000_000
-    print(f"\n[Profile Result] Average Paged Fetch Latency: {avg_time_us:.2f} microseconds")
+    # Extract times (elapsed_time returns milliseconds)
+    latencies_us = [s.elapsed_time(e) * 1000.0 for s, e in events]
+    
+    # Sort to calculate percentiles
+    latencies_us.sort()
+    
+    avg_us = sum(latencies_us) / len(latencies_us)
+    p95_us = latencies_us[int(len(latencies_us) * 0.95)]
+    p99_us = latencies_us[int(len(latencies_us) * 0.99)]
+    
+    print(f"\n[Profile Results over {iterations} iterations]")
+    print(f"Average Latency: {avg_us:.2f} microseconds")
+    print(f"p95 Latency:     {p95_us:.2f} microseconds")
+    print(f"p99 Latency:     {p99_us:.2f} microseconds")
 
 if __name__ == "__main__":
     assert torch.cuda.is_available()
