@@ -161,7 +161,7 @@ __global__ void unpermute_kernel(
     }
 }
 
-// 1. PagedAttention Memory Fetch Kernel (Vectorized float4)
+// 1. PagedAttention Memory Fetch Kernel (Warp-Coalesced, 1 Warp = 1 Token)
 __global__ void paged_memory_fetch_kernel(
     const float* __restrict__ physical_kv_cache, 
     const int* __restrict__ block_tables,        
@@ -171,35 +171,41 @@ __global__ void paged_memory_fetch_kernel(
     int head_dim,
     int total_tokens_to_fetch
 ) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (global_idx >= total_tokens_to_fetch) return;
+    // 1 Warp (32 threads) processes 1 entire token.
+    int global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane_id = threadIdx.x % 32;
 
+    if (global_warp_id >= total_tokens_to_fetch) return;
+
+    // Use warp ID instead of global index to find the token
     int seq_len = max_blocks_per_seq * block_size;
-    
-    int seq_idx = global_idx / seq_len;
-    int token_in_seq = global_idx % seq_len;
+    int seq_idx = global_warp_id / seq_len;
+    int token_in_seq = global_warp_id % seq_len;
 
     int logical_block_idx = token_in_seq / block_size;
     int token_offset = token_in_seq % block_size;
 
-    int table_index = (seq_idx * max_blocks_per_seq) + logical_block_idx;
-    int physical_block_id = block_tables[table_index];
+    // Only one thread per warp needs to look up the physical block ID
+    int physical_block_id = block_tables[(seq_idx * max_blocks_per_seq) + logical_block_idx];
+    
+    // Broadcast the lookup result to all 32 threads in the warp
+    physical_block_id = __shfl_sync(0xFFFFFFFF, physical_block_id, 0);
 
-    if (physical_block_id < 0) return; 
+    if (physical_block_id < 0) return;
 
-    int memory_offset = (physical_block_id * block_size * head_dim) + (token_offset * head_dim);
-    int out_offset = global_idx * head_dim;
+    // Calculate base pointers for this specific token
+    int memory_base = (physical_block_id * block_size * head_dim) + (token_offset * head_dim);
+    int out_base = global_warp_id * head_dim;
 
-    // --- OPTIMIZATION: 128-bit Vectorized Reads ---
-    // Cast the raw float pointers to CUDA's native float4 vector types
+    // --- OPTIMIZATION: Warp-Coalesced Vectorized Copy ---
+    // Instead of one thread looping, all 32 threads copy 4 floats simultaneously.
+    // If head_dim is 64, we have 16 float4 vectors. The first 16 threads do the work.
     int vec_dim = head_dim / 4;
-    const float4* vec_in = reinterpret_cast<const float4*>(physical_kv_cache + memory_offset);
-    float4* vec_out = reinterpret_cast<float4*>(output_tokens + out_offset);
+    const float4* vec_in = reinterpret_cast<const float4*>(physical_kv_cache + memory_base);
+    float4* vec_out = reinterpret_cast<float4*>(output_tokens + out_base);
 
-    // Force the compiler to unroll the loop, removing branch instructions
-    #pragma unroll
-    for (int d = 0; d < vec_dim; d++) {
-        vec_out[d] = vec_in[d];
+    if (lane_id < vec_dim) {
+        vec_out[lane_id] = vec_in[lane_id];
     }
 }
 
@@ -245,7 +251,10 @@ torch::Tensor paged_kv_fetch(
 
     int total_tokens = batch_size * seq_len;
     int threads = 256;
-    int blocks = (total_tokens + threads - 1) / threads;
+    
+    // NEW GEOMETRY: We need 32 threads per token.
+    int total_threads_needed = total_tokens * 32;
+    int blocks = (total_threads_needed + threads - 1) / threads;
 
     paged_memory_fetch_kernel<<<blocks, threads>>>(
         physical_kv_cache.data_ptr<float>(),
