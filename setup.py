@@ -17,6 +17,19 @@ setup(
                     '-U__CUDA_NO_HALF_CONVERSIONS__',
                 ],
             }
+        ),
+        CUDAExtension(
+            name='custom_moe_legacy',
+            sources=['csrc/moe_legacy.cu', 'src/mem_manager.cpp'],
+            include_dirs=['src/include'],
+            extra_compile_args={
+                'cxx':  ['-O3'],
+                'nvcc': [
+                    '-O3',
+                    '-U__CUDA_NO_HALF_OPERATORS__',
+                    '-U__CUDA_NO_HALF_CONVERSIONS__',
+                ],
+            }
         )
     ],
     cmdclass={'build_ext': BuildExtension}
