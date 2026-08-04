@@ -107,6 +107,12 @@ public:
     void append_token(BlockTable& table);
     void free_sequence(BlockTable& table);
 
+    // Drain this calling thread's TLA wallet back into the global ring.
+    // Must be called explicitly (e.g. in tests before get_free_count(), or via
+    // a RAII WalletFlusher at thread exit) — the wallet has no automatic
+    // destructor path back to a specific allocator instance.
+    void flush_wallet();
+
     [[nodiscard]] int get_free_count()   const;
     [[nodiscard]] int get_total_blocks() const;
 };

@@ -72,7 +72,7 @@ bool FreeListRing::push(uint32_t block_id) {
 
     slot->block_id = block_id;
     // Publish: sequence = pos+1 signals "slot has data" to any consumer waiting
-    // for exactly this generation.  The release pairs with the acquire in pop().
+    // for exactly this generation.  The release pairs with the acquire in pop()
     slot->sequence.store(pos + 1, std::memory_order_release);
     return true;
 }
@@ -118,6 +118,43 @@ bool FreeListRing::pop(uint32_t& out_block_id) {
 }
 
 // ============================================================
+// Thread-Local Arena (TLA) Wallet
+//
+// Each hardware thread owns a private slab of pre-fetched block IDs.  The
+// global FreeListRing is only touched for bulk refill (BATCH_SIZE pops) and
+// bulk flush (half of MAX_CAPACITY pushes), reducing atomic CAS pressure by
+// ~90% on the hot alloc/free path.
+//
+// Lifecycle note: The wallet deliberately has NO automatic destructor path
+// back to a specific allocator instance — doing so would require a global
+// singleton pointer and would break multi-GPU / multi-pool designs.  Instead,
+// callers are responsible for draining the wallet explicitly via one of:
+//   1. BlockAllocator::flush_wallet()  — called in single-threaded tests
+//      before get_free_count() assertions.
+//   2. The RAII WalletFlusher guard  — placed at the top of worker lambdas
+//      so that blocks are returned to the correct allocator on thread exit,
+//      even if an exception is thrown.
+// ============================================================
+
+struct ThreadLocalWallet {
+    // BATCH_SIZE: number of block IDs pulled from the global ring per refill.
+    // MAX_CAPACITY: once the wallet reaches this size, flush half back.
+    //
+    // These limits are deliberately small.  Unlike CPU allocators (tcmalloc
+    // uses 1 024+ item batches), each block here represents physical GPU VRAM.
+    // Over-hoarding hides VRAM from the system and can cause false OOM errors
+    // even when hundreds of blocks sit idle in other threads' wallets.
+    static constexpr int BATCH_SIZE   = 8;
+    static constexpr int MAX_CAPACITY = 16;
+
+    std::vector<uint32_t> free_ids;
+
+    ThreadLocalWallet() { free_ids.reserve(MAX_CAPACITY); }
+};
+
+thread_local ThreadLocalWallet t_wallet;
+
+// ============================================================
 // BlockAllocator
 // ============================================================
 
@@ -134,12 +171,33 @@ BlockAllocator::BlockAllocator(int num_blocks)
     }
 }
 
-// 2. Handle Allocation — lock-free pop from the ring.
+// 2. Handle Allocation — fast path via TLA wallet; slow path bulk-refills from ring.
+//
+// Hot path (wallet non-empty): zero atomics, L1 cache hit on t_wallet.free_ids.
+// Cold path (wallet empty): BATCH_SIZE atomic pops from free_ring in one go,
+// amortising CAS cost across the next BATCH_SIZE allocations.
 PhysicalBlock* BlockAllocator::allocate_block() {
-    uint32_t id;
-    if (!free_ring.pop(id)) {
-        throw std::runtime_error("OOM: KV Cache Pool Depleted.");
+    // Cold path: wallet is empty — go to the global Bank and bulk-fetch.
+    if (t_wallet.free_ids.empty()) {
+        for (int i = 0; i < ThreadLocalWallet::BATCH_SIZE; ++i) {
+            uint32_t fetched_id;
+            if (free_ring.pop(fetched_id)) {
+                t_wallet.free_ids.push_back(fetched_id);
+            } else {
+                break;  // Global pool exhausted; stop fetching.
+            }
+        }
+
+        // Still empty after trying the global ring → truly OOM.
+        if (t_wallet.free_ids.empty()) {
+            throw std::runtime_error("OOM: KV Cache Pool Depleted.");
+        }
     }
+
+    // Hot path: pop instantly from local wallet.  Zero atomics, zero locks.
+    uint32_t id = t_wallet.free_ids.back();
+    t_wallet.free_ids.pop_back();
+
     PhysicalBlock* block = &physical_memory_pool[id];
     // Release: publish the initialised state to any concurrent thread that may
     // later call fetch_sub (acq_rel) on ref_count.
@@ -148,7 +206,7 @@ PhysicalBlock* BlockAllocator::allocate_block() {
     return block;
 }
 
-// 3. Handle Deallocation (Recycling) — lock-free push back into the ring.
+// 3. Handle Deallocation (Recycling) — deposit into wallet; flush half when full.
 //
 // fetch_sub with acq_rel:
 //   Acquire: all reads/writes by any other thread that held a reference are
@@ -161,11 +219,40 @@ PhysicalBlock* BlockAllocator::allocate_block() {
 void BlockAllocator::free_block(PhysicalBlock* block) {
     if (block->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         block->num_tokens.store(0, std::memory_order_relaxed);
-        free_ring.push(static_cast<uint32_t>(block->physical_block_id));
+
+        // Hot path: deposit into local wallet.  Zero atomics, zero locks.
+        t_wallet.free_ids.push_back(block->physical_block_id);
+
+        // If the wallet is getting too fat, flush half back to the global ring.
+        // Flushing exactly half (rather than all) leaves the wallet warm for
+        // the next allocation burst, avoiding a double round-trip.
+        if (static_cast<int>(t_wallet.free_ids.size()) >= ThreadLocalWallet::MAX_CAPACITY) {
+            int to_flush = static_cast<int>(t_wallet.free_ids.size()) / 2;
+            for (int i = 0; i < to_flush; ++i) {
+                free_ring.push(t_wallet.free_ids.back());
+                t_wallet.free_ids.pop_back();
+            }
+        }
     }
 }
 
-// 4. State Machine: Append Token
+// 4. flush_wallet — drain this thread's entire wallet back to the global ring.
+//
+// Call sites:
+//   • Tests: before any get_free_count() assertion to restore exact accounting.
+//   • RAII WalletFlusher: at thread exit to prevent block leaks when a worker
+//     thread terminates while holding IDs in its wallet.
+//
+// Thread safety: only touches t_wallet (TLS — no sharing) and free_ring
+// (lock-free MPMC — safe from any thread).
+void BlockAllocator::flush_wallet() {
+    for (uint32_t id : t_wallet.free_ids) {
+        free_ring.push(id);
+    }
+    t_wallet.free_ids.clear();
+}
+
+// 5. State Machine: Append Token
 void BlockAllocator::append_token(BlockTable& table) {
     PhysicalBlock* active_block = table.get_append_block();
 
@@ -181,7 +268,7 @@ void BlockAllocator::append_token(BlockTable& table) {
     table.logical_length++;
 }
 
-// 5. State Machine: Evict Sequence
+// 6. State Machine: Evict Sequence
 void BlockAllocator::free_sequence(BlockTable& table) {
     for (PhysicalBlock* block : table.blocks) {
         free_block(block);

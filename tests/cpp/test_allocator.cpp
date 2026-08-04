@@ -24,6 +24,25 @@
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────
+// RAII wallet flush guard
+//
+// Place one of these at the top of every worker lambda to ensure the
+// thread's TLA wallet is drained back into the correct allocator when
+// the thread exits — even if it exits via an exception.  Binding to a
+// specific BlockAllocator& keeps the design free of global singletons
+// and multi-pool / multi-GPU safe.
+// ─────────────────────────────────────────────────────────────
+
+struct WalletFlusher {
+    BlockAllocator& alloc;
+    explicit WalletFlusher(BlockAllocator& a) : alloc(a) {}
+    ~WalletFlusher() { alloc.flush_wallet(); }
+    // Non-copyable, non-movable — must be a named local in the lambda.
+    WalletFlusher(const WalletFlusher&)            = delete;
+    WalletFlusher& operator=(const WalletFlusher&) = delete;
+};
+
+// ─────────────────────────────────────────────────────────────
 // Minimal test harness
 // ─────────────────────────────────────────────────────────────
 
@@ -69,6 +88,7 @@ static void run_test(const std::string& name, void (*fn)()) {
 /** Pool reports exactly num_blocks free entries after construction. */
 static void test_pool_init() {
     BlockAllocator alloc(256);
+    alloc.flush_wallet();  // drain any TLA residue before exact count check
     ASSERT(alloc.get_free_count() == 256, "free count should equal pool size");
     ASSERT(alloc.get_total_blocks() == 256, "total_blocks should equal pool size");
 }
@@ -81,9 +101,11 @@ static void test_single_alloc_free() {
     ASSERT(b != nullptr, "allocated block must not be null");
     ASSERT(b->ref_count.load() == 1, "fresh block ref_count must be 1");
     ASSERT(b->num_tokens.load() == 0, "fresh block num_tokens must be 0");
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 63, "free count should decrease by 1");
 
     alloc.free_block(b);
+    alloc.flush_wallet();  // drain wallet deposit before exact count check
     ASSERT(alloc.get_free_count() == 64, "free count should be restored");
 }
 
@@ -96,6 +118,7 @@ static void test_full_pool_oom() {
     for (int i = 0; i < N; i++) {
         held[i] = alloc.allocate_block();
     }
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 0, "pool must be empty");
 
     bool threw = false;
@@ -108,6 +131,7 @@ static void test_full_pool_oom() {
 
     // Free one block; the pool recovers.
     alloc.free_block(held[0]);
+    alloc.flush_wallet();  // drain wallet deposit before exact count check
     ASSERT(alloc.get_free_count() == 1, "one freed block must reappear");
     PhysicalBlock* recovered = alloc.allocate_block();
     ASSERT(recovered != nullptr, "recovered block must be valid");
@@ -134,11 +158,13 @@ static void test_refcount_sharing() {
 
     // First sequence is done — decrement but block stays alive.
     alloc.free_block(shared);
+    alloc.flush_wallet();  // drain wallet before exact count check
     ASSERT(alloc.get_free_count() == 7, "block must NOT be recycled yet");
     ASSERT(shared->ref_count.load() == 1, "ref_count must drop to 1");
 
     // Second sequence is done — now the block is truly free.
     alloc.free_block(shared);
+    alloc.flush_wallet();  // drain wallet before exact count check
     ASSERT(alloc.get_free_count() == 8, "block must be recycled when ref_count hits 0");
 }
 
@@ -158,6 +184,7 @@ static void test_append_token_state_machine() {
 
     ASSERT(req.logical_length == 33,  "logical_length must equal tokens appended");
     ASSERT((int)req.blocks.size() == 3, "3 physical blocks needed for 33 tokens");
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 29, "32 - 3 = 29 free blocks must remain");
 }
 
@@ -171,6 +198,7 @@ static void test_free_sequence_recycles_all() {
 
     ASSERT(req.blocks.empty(),        "BlockTable must be empty after free");
     ASSERT(req.logical_length == 0,   "logical_length must reset to 0");
+    alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == 32, "all blocks must be recycled");
 }
 
@@ -188,10 +216,12 @@ static void test_pool_reuse_wraparound() {
     // Round 1 — drain pool.
     std::vector<PhysicalBlock*> held(N);
     for (int i = 0; i < N; i++) held[i] = alloc.allocate_block();
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 0, "pool must be drained");
 
     // Round 1 — refill.
     for (auto* b : held) alloc.free_block(b);
+    alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == N, "pool must be fully refilled");
 
     // Round 2 — drain again (ring has wrapped).
@@ -201,6 +231,7 @@ static void test_pool_reuse_wraparound() {
         ASSERT(held2[i] != nullptr, "post-wraparound alloc must succeed");
     }
     for (auto* b : held2) alloc.free_block(b);
+    alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == N, "pool must be fully refilled after round 2");
 }
 
@@ -215,12 +246,14 @@ static void test_multiple_sequences_independent() {
 
     // 20→2 blocks, 35→3 blocks, 10→1 block = 6 total
     int expected_free = 128 - (2 + 3 + 1);
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == expected_free,
            "free count must reflect all three concurrent sequences");
 
     alloc.free_sequence(req_a);
     alloc.free_sequence(req_b);
     alloc.free_sequence(req_c);
+    alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == 128, "all blocks must return after eviction");
 }
 
@@ -255,6 +288,11 @@ static void test_concurrent_4thread_stress() {
     std::atomic<int> oom_count{0};
 
     auto worker = [&]() {
+        // RAII guard: flushes this thread's TLA wallet back to alloc on exit,
+        // even if the thread exits via exception.  Prevents block leaks without
+        // a global singleton pointer.
+        WalletFlusher flusher(alloc);
+
         for (int i = 0; i < ITERS; i++) {
             try {
                 PhysicalBlock* b = alloc.allocate_block();
@@ -272,6 +310,9 @@ static void test_concurrent_4thread_stress() {
     for (auto& t : threads) t = std::thread(worker);
     for (auto& t : threads) t.join();
 
+    // Main thread: flush its own wallet too (it may have been used by
+    // construction-time ring pushes in BlockAllocator's constructor).
+    alloc.flush_wallet();
     ASSERT(alloc.get_free_count() == POOL,
            "all blocks must be recovered after concurrent stress");
 }
@@ -291,6 +332,8 @@ static void test_concurrent_high_contention() {
     std::atomic<int> success_count{0};
 
     auto worker = [&]() {
+        WalletFlusher flusher(alloc);  // flush on thread exit
+
         for (int i = 0; i < ITERS; i++) {
             try {
                 PhysicalBlock* b = alloc.allocate_block();
@@ -306,6 +349,7 @@ static void test_concurrent_high_contention() {
     for (auto& t : threads) t = std::thread(worker);
     for (auto& t : threads) t.join();
 
+    alloc.flush_wallet();  // flush main thread wallet
     ASSERT(alloc.get_free_count() == POOL,
            "pool must be fully recovered after high-contention stress");
     // Sanity: there must have been at least some successful allocations.
@@ -335,6 +379,8 @@ static void test_concurrent_producer_consumer() {
     std::atomic<bool> producers_done{false};
 
     auto producer = [&]() {
+        WalletFlusher flusher(alloc);  // flush on thread exit
+
         for (int i = 0; i < ITERS; i++) {
             try {
                 PhysicalBlock* b = alloc.allocate_block();
@@ -352,6 +398,8 @@ static void test_concurrent_producer_consumer() {
     };
 
     auto consumer = [&]() {
+        WalletFlusher flusher(alloc);  // flush on thread exit
+
         while (!producers_done.load(std::memory_order_acquire)) {
             int slot = read_cursor.fetch_add(1, std::memory_order_relaxed) & (Q - 1);
             PhysicalBlock* b = queue[slot].exchange(nullptr, std::memory_order_acquire);
@@ -372,6 +420,7 @@ static void test_concurrent_producer_consumer() {
     producers_done.store(true, std::memory_order_release);
     for (int i = PRODUCERS; i < PRODUCERS + CONSUMERS; i++) threads[i].join();
 
+    alloc.flush_wallet();  // flush main thread wallet
     ASSERT(alloc.get_free_count() == POOL,
            "producer/consumer pattern must leave pool fully recovered");
 }
@@ -385,8 +434,10 @@ static void test_pool_size_one() {
     BlockAllocator alloc(1);
     PhysicalBlock* b = alloc.allocate_block();
     ASSERT(b != nullptr, "single-slot pool must yield a block");
+    alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 0, "pool must be empty");
     alloc.free_block(b);
+    alloc.flush_wallet();  // drain wallet deposit before exact count check
     ASSERT(alloc.get_free_count() == 1, "pool must recover");
 
     // Must be allocatable again.
@@ -411,6 +462,7 @@ static void test_block_boundary_exact_fill() {
     ASSERT(!req.blocks[1]->is_full(), "second block must not yet be full");
 
     alloc.free_sequence(req);
+    alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == 8, "full recovery after boundary test");
 }
 
