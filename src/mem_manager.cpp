@@ -161,6 +161,10 @@ thread_local ThreadLocalWallet t_wallet;
 // 1. Initialize the Pool
 BlockAllocator::BlockAllocator(int num_blocks)
     : free_ring(static_cast<uint32_t>(num_blocks)), total_blocks(num_blocks) {
+    // Clear any thread-local wallet leftovers from prior allocator instances
+    // to prevent stale block IDs from being used in a different physical pool.
+    t_wallet.free_ids.clear();
+
     // Allocate the pool as a fixed-size heap array. PhysicalBlock contains
     // std::atomic members that are non-copyable/non-movable, so std::vector
     // cannot be used (it would attempt a copy/move on reallocation).
