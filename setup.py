@@ -3,6 +3,10 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name='custom_moe',
+    install_requires=[
+        "transformers>=4.51",
+        "torch>=2.2",
+    ],
     ext_modules=[
         CUDAExtension(
             name='custom_moe_cuda',

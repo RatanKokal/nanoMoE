@@ -30,6 +30,7 @@ Usage
 """
 
 import sys
+import math
 import torch
 import torch.nn as nn
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
@@ -39,6 +40,7 @@ from transformers import MixtralConfig
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from inference.nano_moe_layer import NanoMoELayer
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -90,14 +92,19 @@ def test_moe_parity(
         num_experts_per_tok=num_experts_per_tok,
     )
 
-    # ── 2. Reference HF block (eval, deterministic, shared weights) ──────────
+    # ── 2. Build block; extract weights for the pure-Python reference ─────────
+    #   MixtralExperts is decorated with @use_experts_implementation which
+    #   intercepts forward() when config._experts_implementation is None
+    #   (standalone usage).  To avoid that interference we never call
+    #   hf_moe.forward() — instead _ref_moe_forward() replicates the math
+    #   directly from the weight tensors.
     torch.manual_seed(0)
     hf_moe = MixtralSparseMoeBlock(config).to(device=device, dtype=dtype)
     hf_moe.eval()
 
     # ── 3. NanoMoE wrapper over the *same* block ─────────────────────────────
-    #   We pass the same hf_moe object; NanoMoELayer registers gate & experts
-    #   as sub-modules so they share weights — no copying.
+    #   We pass the same hf_moe object; NanoMoELayer shares gate & expert
+    #   weights — no copying.
     nano_moe = NanoMoELayer(
         hf_moe,
         num_experts=num_local_experts,
@@ -107,20 +114,25 @@ def test_moe_parity(
     nano_moe.eval()
 
     # ── 4. Synthetic input ───────────────────────────────────────────────────
+    #   Scale by 1/sqrt(hidden_size) to match the activation variance of a
+    #   real pre-trained model.  Raw randn() produces gate logits of ~60–80
+    #   in FP32, pushing exp(logit) past float32 max → inf → NaN softmax.
     test_input = torch.randn(
         batch_size, seq_len, hidden_size,
         device=device, dtype=dtype
-    )
+    ) / math.sqrt(hidden_size)
     print(f"\n  Input  : {list(test_input.shape)}  device={device}  "
           f"dtype={test_input.dtype}")
 
     # ── 5. HF reference forward ──────────────────────────────────────────────
     with torch.no_grad():
-        hf_output, hf_router_logits = hf_moe(test_input)
+        hf_res = hf_moe(test_input)
+        hf_output = hf_res[0] if isinstance(hf_res, tuple) else hf_res
 
     # ── 6. NanoMoE forward ───────────────────────────────────────────────────
     with torch.no_grad():
-        nano_output, _nano_logits = nano_moe(test_input)  # router_logits=None at inference
+        nano_res = nano_moe(test_input)
+        nano_output = nano_res[0] if isinstance(nano_res, tuple) else nano_res
 
     # ── 7. Shape sanity ──────────────────────────────────────────────────────
     assert hf_output.shape == nano_output.shape, (
