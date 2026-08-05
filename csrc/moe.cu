@@ -50,7 +50,8 @@ __global__ void topk_softmax_kernel(
 
     for (int step = 0; step < k; step++) {
         float thread_max         = -1e9f;
-        int   thread_best_expert = -1;
+        int   thread_best_expert = 0;   // default to expert 0; guards against NaN logits
+                                        // producing index -1 which causes illegal GPU memory access
         int   best_local_idx     = -1;
 
         for (int i = 0; i < num_per_lane; i++) {
@@ -94,11 +95,15 @@ __global__ void topk_softmax_kernel(
 __global__ void expert_histogram_kernel(
     const int* __restrict__ topk_indices,
     int*       __restrict__ histogram,
-    int total_routed
+    int total_routed,
+    int E
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < total_routed)
-        atomicAdd(&histogram[topk_indices[idx]], 1);
+    if (idx < total_routed) {
+        int e = topk_indices[idx];
+        if (e >= 0 && e < E)              // guard: NaN logits can write e=-1
+            atomicAdd(&histogram[e], 1);
+    }
 }
 
 __global__ void permute_kernel(
@@ -287,7 +292,7 @@ std::vector<torch::Tensor> route_and_permute(torch::Tensor x, torch::Tensor W_g,
     );
 
     expert_histogram_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
-        g_cache.topk_indices.data_ptr<int>(), g_cache.histogram.data_ptr<int>(), total
+        g_cache.topk_indices.data_ptr<int>(), g_cache.histogram.data_ptr<int>(), total, E
     );
 
     cub::DeviceScan::ExclusiveSum(
