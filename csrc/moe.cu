@@ -9,20 +9,36 @@
 #define MAX_K 8
 #define MAX_EXPERTS_PER_LANE 16  // Supports up to 512 experts (16 * 32 lanes)
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Warp Primitives
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
+/**
+ * @brief Performs warp-wide max reduction using register shuffles (__shfl_down_sync).
+ */
 __inline__ __device__ float warp_reduce_max(float val) {
     for (int offset = 16; offset > 0; offset /= 2)
         val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
     return val;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Kernels (Identical logic, zero atomics, float4 vectorization)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// CUDA Kernels
+// -----------------------------------------------------------------------------
 
+/**
+ * @brief Warp-parallel Top-K routing with inline softmax normalization.
+ *
+ * Each warp processes one input token across expert logits. Uses warp shuffles
+ * and PTX intrinsics (__expf, __fdividef) for high-efficiency top-k selection.
+ *
+ * @param logits Input gating logits tensor [N, E].
+ * @param topk_indices Output selected expert IDs tensor [N, k].
+ * @param topk_weights Output normalized routing weights tensor [N, k].
+ * @param N Total tokens.
+ * @param E Number of experts.
+ * @param k Top-k selection count.
+ */
 __global__ void topk_softmax_kernel(
     const float* __restrict__ logits, 
     int*         __restrict__ topk_indices, 
@@ -91,6 +107,9 @@ __global__ void topk_softmax_kernel(
     }
 }
 
+/**
+ * @brief Computes expert load histogram via atomic counters.
+ */
 __global__ void expert_histogram_kernel(
     const int* __restrict__ topk_indices,
     int*       __restrict__ histogram,
@@ -101,6 +120,11 @@ __global__ void expert_histogram_kernel(
         atomicAdd(&histogram[topk_indices[idx]], 1);
 }
 
+/**
+ * @brief Vectorized float4 token scatter into expert batch buffers.
+ *
+ * Emits reverse_map indices to enable atomic-free unpermutation on the return path.
+ */
 __global__ void permute_kernel(
     const float* __restrict__ input_tokens,
     const int*   __restrict__ topk_indices,
@@ -116,7 +140,7 @@ __global__ void permute_kernel(
     __shared__ int dest_row;
     if (threadIdx.x == 0) {
         dest_row         = atomicAdd(&write_pointers[topk_indices[row]], 1);
-        reverse_map[row] = dest_row; // Needed for zero-atomic unpermute gather
+        reverse_map[row] = dest_row; // COO index map for zero-atomic unpermute
     }
     __syncthreads();
 
@@ -128,6 +152,9 @@ __global__ void permute_kernel(
         vec_out[col] = vec_in[col];
 }
 
+/**
+ * @brief Vectorized float4 unpermute gather and weighted output accumulation.
+ */
 __global__ void unpermute_kernel(
     const float* __restrict__ expert_out,    
     const float* __restrict__ topk_weights,  
@@ -188,9 +215,9 @@ __global__ void paged_memory_fetch_kernel(
     if (lane_id < vec_dim) vec_out[lane_id] = vec_in[lane_id];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Stable Persistent Buffer Cache (No Raw CUDA Graphs)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 struct MoEBufferCache {
     bool  ready   = false;
@@ -237,9 +264,9 @@ static void allocate_buffers(const torch::Tensor& x, const torch::Tensor& W_g, i
     g_cache.ready = true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // PyTorch C++ Bindings
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 torch::Tensor prepare_block_tables_for_gpu(const std::vector<BlockTable>& active_requests, int max_blocks_per_seq) {
     int batch_size = active_requests.size();
@@ -325,7 +352,7 @@ torch::Tensor unpermute(torch::Tensor expert_out, torch::Tensor reverse_map, tor
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("route_and_permute", &route_and_permute, "Fused route + permute (returns 4 tensors to match legacy unpack)");
-    m.def("unpermute", &unpermute, "Gather unpermute — 1 block per token, no atomics, float4 stores");
+    m.def("unpermute", &unpermute, "Gather unpermute  -  1 block per token, no atomics, float4 stores");
     m.def("paged_kv_fetch", &paged_kv_fetch, "Warp-coalesced paged KV cache fetch");
-    m.def("prepare_block_tables_for_gpu", &prepare_block_tables_for_gpu, "CPU BlockTable vector → GPU int32 tensor");
+    m.def("prepare_block_tables_for_gpu", &prepare_block_tables_for_gpu, "CPU BlockTable vector -> GPU int32 tensor");
 }

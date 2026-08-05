@@ -1,15 +1,15 @@
-# nanoMoE — Top-level Makefile
+# nanoMoE  -  Top-level Makefile
 #
 # Delegates to the sub-Makefiles for C++ targets.
 # Python tests and benchmarks require the CUDA extension to be built first
 # via `pip install -e .` (needs a GPU host).
 #
 # Usage:
-#   make test          — build + run C++ test suite
-#   make tsan          — build + run tests under ThreadSanitizer
-#   make bench         — build + run CPU allocator benchmark
-#   make build-ext     — build the CUDA PyTorch extension (GPU required)
-#   make clean         — remove all build artefacts
+#   make test           -  build + run C++ test suite
+#   make tsan           -  build + run tests under ThreadSanitizer
+#   make bench          -  build + run CPU allocator benchmark
+#   make build-ext      -  build the CUDA PyTorch extension (GPU required)
+#   make clean          -  remove all build artefacts
 
 .PHONY: test tsan bench build-ext clean
 

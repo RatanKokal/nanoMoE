@@ -1,3 +1,10 @@
+"""
+nanoMoE CUDA Routing & Permutation Test Suite.
+
+Verifies mathematical parity between custom CUDA kernels (topk_softmax, histogram,
+permute, unpermute) and native PyTorch reference routing. Measures hardware speedup.
+"""
+
 import torch
 import torch.nn as nn
 import custom_moe_cuda
@@ -125,8 +132,8 @@ if __name__ == "__main__":
     cu_time = start_event.elapsed_time(end_event) / iters * 1000
 
     print("="*40)
-    print(f"PyTorch Latency:     {pt_time:.2f} µs")
-    print(f"CUDA Engine Latency: {cu_time:.2f} µs")
+    print(f"PyTorch Latency:     {pt_time:.2f} us")
+    print(f"CUDA Engine Latency: {cu_time:.2f} us")
     print("-" * 40)
     print(f"Hardware Speedup:    {pt_time / cu_time:.2f}x")
     print("="*40)

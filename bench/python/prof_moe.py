@@ -2,9 +2,9 @@ import torch
 import custom_moe_cuda
 import custom_moe_legacy
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PyTorch Native Reference Implementation (Vectorized)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def pytorch_reference_route_and_permute(x, W_g, k):
     N, d_model = x.shape
@@ -38,9 +38,9 @@ def pytorch_reference_unpermute(expert_out, coo_indices, coo_weights, N):
     final_out.index_add_(0, coo_indices, weighted)
     return final_out
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Profiling Helper Functions
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def benchmark_pytorch(x, W_g, k, N, iters=50, warmup=10):
     for _ in range(warmup):
@@ -108,17 +108,17 @@ if __name__ == "__main__":
     # 1. Profile PyTorch Native Reference
     print("\nProfiling 1/3: PyTorch Native Reference...")
     pt_us, pt_ms = benchmark_pytorch(x, W_g, k, N, iters=iters)
-    print(f" -> PyTorch Native:         {pt_us:9.2f} µs ({pt_ms:6.3f} ms)")
+    print(f" -> PyTorch Native:         {pt_us:9.2f} us ({pt_ms:6.3f} ms)")
 
     # 2. Profile Legacy CUDA Engine (csrc/moe_legacy.cu)
     print("\nProfiling 2/3: Legacy CUDA Engine (custom_moe_legacy)...")
     legacy_us, legacy_ms = benchmark_engine(custom_moe_legacy, "Legacy_CUDA_Engine", x, W_g, k, N, iters=iters)
-    print(f" -> Legacy CUDA Engine:    {legacy_us:9.2f} µs ({legacy_ms:6.3f} ms)")
+    print(f" -> Legacy CUDA Engine:    {legacy_us:9.2f} us ({legacy_ms:6.3f} ms)")
 
     # 3. Profile Optimized CUDA Engine (csrc/moe.cu)
     print("\nProfiling 3/3: Optimized CUDA Engine (custom_moe_cuda)...")
     opt_us, opt_ms = benchmark_engine(custom_moe_cuda, "Optimized_CUDA_Engine", x, W_g, k, N, iters=iters)
-    print(f" -> Optimized CUDA Engine: {opt_us:9.2f} µs ({opt_ms:6.3f} ms)")
+    print(f" -> Optimized CUDA Engine: {opt_us:9.2f} us ({opt_ms:6.3f} ms)")
 
     # 4. Print Performance Summary & Speedup Comparisons
     speedup_vs_legacy = legacy_us / opt_us if opt_us > 0 else 0.0
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 70)
     print("BENCHMARK COMPARISON SUMMARY:")
-    print(f"  1. PyTorch Native Reference:        {pt_us:9.2f} µs ({pt_ms:6.3f} ms) | [Baseline]")
-    print(f"  2. Legacy Engine (custom_moe_legacy):  {legacy_us:9.2f} µs ({legacy_ms:6.3f} ms) | {legacy_us/pt_us:6.2f}x vs PyTorch")
-    print(f"  3. Optimized Engine (custom_moe_cuda):   {opt_us:9.2f} µs ({opt_ms:6.3f} ms) | {speedup_vs_legacy:6.2f}x vs Legacy | {speedup_vs_pytorch:6.2f}x vs PyTorch")
+    print(f"  1. PyTorch Native Reference:        {pt_us:9.2f} us ({pt_ms:6.3f} ms) | [Baseline]")
+    print(f"  2. Legacy Engine (custom_moe_legacy):  {legacy_us:9.2f} us ({legacy_ms:6.3f} ms) | {legacy_us/pt_us:6.2f}x vs PyTorch")
+    print(f"  3. Optimized Engine (custom_moe_cuda):   {opt_us:9.2f} us ({opt_ms:6.3f} ms) | {speedup_vs_legacy:6.2f}x vs Legacy | {speedup_vs_pytorch:6.2f}x vs PyTorch")
     print("=" * 70)

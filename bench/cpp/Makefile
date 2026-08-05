@@ -16,7 +16,7 @@ all: $(TARGET)
 $(TARGET): $(SRCS)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-# Self-contained legacy binary — no dependency on current mem_manager sources.
+# Self-contained legacy binary  -  no dependency on current mem_manager sources.
 legacy: $(LEGACY_TARGET)
 
 $(LEGACY_TARGET): $(LEGACY_SRCS)

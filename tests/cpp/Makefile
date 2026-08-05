@@ -14,7 +14,7 @@ all: $(TARGET)
 $(TARGET): $(SRCS)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-# ThreadSanitizer build — detects data races under concurrent tests.
+# ThreadSanitizer build  -  detects data races under concurrent tests.
 tsan: $(SRCS)
 	$(CXX) $(CXXFLAGS) -O1 -fsanitize=thread $^ -o $(TSAN_TARGET)
 

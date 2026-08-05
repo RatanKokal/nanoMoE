@@ -3,9 +3,9 @@
  * @brief Comprehensive test suite for the lock-free BlockAllocator.
  *
  * Tests are grouped into three tiers:
- *   Tier 1 — Correctness  : single-threaded invariant checks.
- *   Tier 2 — Concurrency  : multi-threaded stress under contention.
- *   Tier 3 — Edge Cases   : OOM, pool reuse, ref-count sharing.
+ *   Tier 1  -  Correctness  : single-threaded invariant checks.
+ *   Tier 2  -  Concurrency  : multi-threaded stress under contention.
+ *   Tier 3  -  Edge Cases   : OOM, pool reuse, ref-count sharing.
  *
  * Build:
  *   make -C tests/cpp          (from repo root)
@@ -23,28 +23,28 @@
 #include <thread>
 #include <vector>
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // RAII wallet flush guard
 //
 // Place one of these at the top of every worker lambda to ensure the
 // thread's TLA wallet is drained back into the correct allocator when
-// the thread exits — even if it exits via an exception.  Binding to a
+// the thread exits  -  even if it exits via an exception.  Binding to a
 // specific BlockAllocator& keeps the design free of global singletons
 // and multi-pool / multi-GPU safe.
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 
 struct WalletFlusher {
     BlockAllocator& alloc;
     explicit WalletFlusher(BlockAllocator& a) : alloc(a) {}
     ~WalletFlusher() { alloc.flush_wallet(); }
-    // Non-copyable, non-movable — must be a named local in the lambda.
+    // Non-copyable, non-movable  -  must be a named local in the lambda.
     WalletFlusher(const WalletFlusher&)            = delete;
     WalletFlusher& operator=(const WalletFlusher&) = delete;
 };
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Minimal test harness
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 
 static int g_passed = 0;
 static int g_failed = 0;
@@ -58,15 +58,15 @@ static int g_failed = 0;
 static void run_test(const std::string& name, void (*fn)()) {
     try {
         fn();
-        std::cout << "  \033[32m✓\033[0m  " << name << "\n";
+        std::cout << "  \033[32m\033[0m  " << name << "\n";
         ++g_passed;
     } catch (const std::exception& e) {
-        std::cout << "  \033[31m✗\033[0m  " << name
-                  << "  →  " << e.what() << "\n";
+        std::cout << "  \033[31m\033[0m  " << name
+                  << "  ->  " << e.what() << "\n";
         ++g_failed;
     } catch (...) {
-        std::cout << "  \033[31m✗\033[0m  " << name
-                  << "  →  unknown exception\n";
+        std::cout << "  \033[31m\033[0m  " << name
+                  << "  ->  unknown exception\n";
         ++g_failed;
     }
 }
@@ -81,9 +81,9 @@ static void run_test(const std::string& name, void (*fn)()) {
                 std::to_string(__LINE__));                   \
     } while (0)
 
-// ─────────────────────────────────────────────────────────────
-// Tier 1 — Correctness Tests (single-threaded)
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Tier 1  -  Correctness Tests (single-threaded)
+// -------------------------------------------------------------
 
 /** Pool reports exactly num_blocks free entries after construction. */
 static void test_pool_init() {
@@ -152,17 +152,17 @@ static void test_refcount_sharing() {
     PhysicalBlock* shared = alloc.allocate_block();
     ASSERT(shared->ref_count.load() == 1, "initial ref_count must be 1");
 
-    // A second sequence "borrows" the block — bump ref_count manually.
+    // A second sequence "borrows" the block  -  bump ref_count manually.
     shared->ref_count.fetch_add(1, std::memory_order_relaxed);
     ASSERT(shared->ref_count.load() == 2, "ref_count must be 2 after borrow");
 
-    // First sequence is done — decrement but block stays alive.
+    // First sequence is done  -  decrement but block stays alive.
     alloc.free_block(shared);
     alloc.flush_wallet();  // drain wallet before exact count check
     ASSERT(alloc.get_free_count() == 7, "block must NOT be recycled yet");
     ASSERT(shared->ref_count.load() == 1, "ref_count must drop to 1");
 
-    // Second sequence is done — now the block is truly free.
+    // Second sequence is done  -  now the block is truly free.
     alloc.free_block(shared);
     alloc.flush_wallet();  // drain wallet before exact count check
     ASSERT(alloc.get_free_count() == 8, "block must be recycled when ref_count hits 0");
@@ -203,7 +203,7 @@ static void test_free_sequence_recycles_all() {
 }
 
 /**
- * @brief Pool reuse: allocate all → free all → allocate all again.
+ * @brief Pool reuse: allocate all -> free all -> allocate all again.
  *
  * This exercises the ring buffer's wraparound path: after N pops followed
  * by N pushes, the sequence numbers advance by one full rotation and the
@@ -213,18 +213,18 @@ static void test_pool_reuse_wraparound() {
     constexpr int N = 64;
     BlockAllocator alloc(N);
 
-    // Round 1 — drain pool.
+    // Round 1  -  drain pool.
     std::vector<PhysicalBlock*> held(N);
     for (int i = 0; i < N; i++) held[i] = alloc.allocate_block();
     alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == 0, "pool must be drained");
 
-    // Round 1 — refill.
+    // Round 1  -  refill.
     for (auto* b : held) alloc.free_block(b);
     alloc.flush_wallet();  // drain wallet deposits before exact count check
     ASSERT(alloc.get_free_count() == N, "pool must be fully refilled");
 
-    // Round 2 — drain again (ring has wrapped).
+    // Round 2  -  drain again (ring has wrapped).
     std::vector<PhysicalBlock*> held2(N);
     for (int i = 0; i < N; i++) {
         held2[i] = alloc.allocate_block();
@@ -244,7 +244,7 @@ static void test_multiple_sequences_independent() {
     for (int i = 0; i < 35; i++) alloc.append_token(req_b);
     for (int i = 0; i < 10; i++) alloc.append_token(req_c);
 
-    // 20→2 blocks, 35→3 blocks, 10→1 block = 6 total
+    // 20->2 blocks, 35->3 blocks, 10->1 block = 6 total
     int expected_free = 128 - (2 + 3 + 1);
     alloc.flush_wallet();  // drain speculative prefetch before exact count check
     ASSERT(alloc.get_free_count() == expected_free,
@@ -270,9 +270,9 @@ static void test_block_ids_are_valid() {
     for (auto* b : ptrs) alloc.free_block(b);
 }
 
-// ─────────────────────────────────────────────────────────────
-// Tier 2 — Concurrency Tests (multi-threaded)
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Tier 2  -  Concurrency Tests (multi-threaded)
+// -------------------------------------------------------------
 
 /**
  * @brief Standard 4-thread stress: each thread allocates one block,
@@ -393,7 +393,7 @@ static void test_concurrent_producer_consumer() {
                             std::memory_order_relaxed)) {
                     expected = nullptr;
                 }
-            } catch (const std::runtime_error&) { /* pool busy — skip */ }
+            } catch (const std::runtime_error&) { /* pool busy  -  skip */ }
         }
     };
 
@@ -425,11 +425,11 @@ static void test_concurrent_producer_consumer() {
            "producer/consumer pattern must leave pool fully recovered");
 }
 
-// ─────────────────────────────────────────────────────────────
-// Tier 3 — Edge Cases
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Tier 3  -  Edge Cases
+// -------------------------------------------------------------
 
-/** A pool of size 1 must still satisfy alloc → free → alloc correctly. */
+/** A pool of size 1 must still satisfy alloc -> free -> alloc correctly. */
 static void test_pool_size_one() {
     BlockAllocator alloc(1);
     PhysicalBlock* b = alloc.allocate_block();
@@ -456,7 +456,7 @@ static void test_block_boundary_exact_fill() {
     ASSERT((int)req.blocks.size() == 1, "one full block must be used");
     ASSERT(req.blocks[0]->is_full(), "first block must report is_full()");
 
-    // One more token must trigger a page fault → second block.
+    // One more token must trigger a page fault -> second block.
     alloc.append_token(req);
     ASSERT((int)req.blocks.size() == 2, "page fault must allocate second block");
     ASSERT(!req.blocks[1]->is_full(), "second block must not yet be full");
@@ -466,20 +466,20 @@ static void test_block_boundary_exact_fill() {
     ASSERT(alloc.get_free_count() == 8, "full recovery after boundary test");
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Main
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 
 int main() {
     using std::chrono::steady_clock;
     auto t0 = steady_clock::now();
 
-    std::cout << "\n\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n";
+    std::cout << "\n\033[1;34m\033[0m\n";
     std::cout << "\033[1;34m  nanoMoE :: BlockAllocator Test Suite\033[0m\n";
-    std::cout << "\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n";
+    std::cout << "\033[1;34m\033[0m\n\n";
 
-    // ── Tier 1: Correctness ──────────────────────────────────
-    std::cout << "\033[1mTier 1 — Correctness\033[0m\n";
+    // -- Tier 1: Correctness ----------------------------------
+    std::cout << "\033[1mTier 1  -  Correctness\033[0m\n";
     run_test("Pool initialisation",              test_pool_init);
     run_test("Single allocate / free cycle",     test_single_alloc_free);
     run_test("Full-pool OOM + recovery",         test_full_pool_oom);
@@ -492,18 +492,18 @@ int main() {
     run_test("Block boundary exact fill",        test_block_boundary_exact_fill);
     run_test("Pool size = 1 (edge case)",        test_pool_size_one);
 
-    // ── Tier 2: Concurrency ──────────────────────────────────
-    std::cout << "\n\033[1mTier 2 — Concurrency\033[0m\n";
+    // -- Tier 2: Concurrency ----------------------------------
+    std::cout << "\n\033[1mTier 2  -  Concurrency\033[0m\n";
     run_test("4-thread stress (10k iters each)", test_concurrent_4thread_stress);
     run_test("8-thread high contention",         test_concurrent_high_contention);
     run_test("Producer / consumer split",        test_concurrent_producer_consumer);
 
-    // ── Summary ──────────────────────────────────────────────
+    // -- Summary ----------------------------------------------
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         steady_clock::now() - t0).count();
 
     int total = g_passed + g_failed;
-    std::cout << "\n\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n";
+    std::cout << "\n\033[1;34m\033[0m\n";
     if (g_failed == 0) {
         std::cout << "\033[1;32m  PASSED " << g_passed << " / " << total
                   << " tests  (" << elapsed_ms << " ms)\033[0m\n";
@@ -511,7 +511,7 @@ int main() {
         std::cout << "\033[1;31m  FAILED " << g_failed << " / " << total
                   << "  (" << g_passed << " passed, " << elapsed_ms << " ms)\033[0m\n";
     }
-    std::cout << "\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n";
+    std::cout << "\033[1;34m\033[0m\n\n";
 
     return g_failed > 0 ? 1 : 0;
 }

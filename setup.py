@@ -3,6 +3,12 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name='custom_moe',
+    version='0.1.0',
+    description='Custom CUDA/C++ MoE Kernels and PagedAttention KV-Cache Manager',
+    python_requires='>=3.8',
+    install_requires=[
+        'torch>=2.0.0',
+    ],
     ext_modules=[
         CUDAExtension(
             name='custom_moe_cuda',

@@ -5,7 +5,7 @@
  * Measures:
  *   1. Single-threaded throughput  (Mops/s, no contention baseline)
  *   2. Latency percentiles         (p50 / p95 / p99 / p99.9 in nanoseconds)
- *   3. N-thread throughput scaling (1 → 2 → 4 → 8 threads)
+ *   3. N-thread throughput scaling (1 -> 2 -> 4 -> 8 threads)
  *
  * All timings use CLOCK_MONOTONIC_RAW to avoid NTP adjustments.
  *
@@ -25,9 +25,9 @@
 #include <thread>
 #include <vector>
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Timing utilities
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 
 /** Return monotonic nanoseconds using the highest-resolution clock. */
 static inline uint64_t now_ns() {
@@ -37,9 +37,9 @@ static inline uint64_t now_ns() {
            static_cast<uint64_t>(ts.tv_nsec);
 }
 
-// ─────────────────────────────────────────────────────────────
-// Benchmark 1 — Single-threaded throughput
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Benchmark 1  -  Single-threaded throughput
+// -------------------------------------------------------------
 
 /**
  * @brief Measure raw allocate + free throughput on a single thread.
@@ -71,7 +71,7 @@ static void bench_single_threaded_throughput() {
     double mops       = (ITERS * 2.0) / elapsed_s / 1e6;  // alloc + free = 2 ops
     double ns_per_op  = (t1 - t0) / static_cast<double>(ITERS * 2);
 
-    std::cout << "\n\033[1mBenchmark 1 — Single-threaded throughput\033[0m\n";
+    std::cout << "\n\033[1mBenchmark 1  -  Single-threaded throughput\033[0m\n";
     std::cout << "  Iterations   : " << ITERS << "\n";
     std::cout << "  Elapsed      : " << std::fixed << std::setprecision(3)
               << elapsed_s * 1000.0 << " ms\n";
@@ -81,16 +81,16 @@ static void bench_single_threaded_throughput() {
               << ns_per_op << " ns\033[0m\n";
 }
 
-// ─────────────────────────────────────────────────────────────
-// Benchmark 2 — Latency percentiles
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Benchmark 2  -  Latency percentiles
+// -------------------------------------------------------------
 
 /**
  * @brief Collect per-operation latency samples and report percentiles.
  *
  * Each sample measures one allocate_block() + free_block() pair.
  * Collecting individual samples is intentionally minimal to avoid
- * observer effect — clock_gettime overhead is ~25 ns on modern Linux.
+ * observer effect  -  clock_gettime overhead is ~25 ns on modern Linux.
  */
 static void bench_latency_percentiles() {
     constexpr int POOL    = 4096;
@@ -118,7 +118,7 @@ static void bench_latency_percentiles() {
         return samples[static_cast<size_t>(p * SAMPLES)];
     };
 
-    std::cout << "\n\033[1mBenchmark 2 — Latency percentiles (alloc + free)\033[0m\n";
+    std::cout << "\n\033[1mBenchmark 2  -  Latency percentiles (alloc + free)\033[0m\n";
     std::cout << "  Samples      : " << SAMPLES << "\n";
     std::cout << "  p50          : " << pct(0.50) << " ns\n";
     std::cout << "  p95          : " << pct(0.95) << " ns\n";
@@ -127,9 +127,9 @@ static void bench_latency_percentiles() {
     std::cout << "  max          : " << samples.back() << " ns\n";
 }
 
-// ─────────────────────────────────────────────────────────────
-// Benchmark 3 — Multi-thread throughput scaling
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Benchmark 3  -  Multi-thread throughput scaling
+// -------------------------------------------------------------
 
 /**
  * @brief Measure aggregate throughput as thread count scales from 1 to N.
@@ -143,7 +143,7 @@ static void bench_throughput_scaling() {
     constexpr int ITERS      = 500'000;
     const int     hw_threads = static_cast<int>(std::thread::hardware_concurrency());
 
-    std::cout << "\n\033[1mBenchmark 3 — Multi-thread throughput scaling\033[0m\n";
+    std::cout << "\n\033[1mBenchmark 3  -  Multi-thread throughput scaling\033[0m\n";
     std::cout << "  Pool size    : " << POOL << " blocks\n";
     std::cout << "  Iters/thread : " << ITERS << "\n";
     std::cout << "  HW threads   : " << hw_threads << "\n\n";
@@ -193,19 +193,19 @@ static void bench_throughput_scaling() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Main
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 
 int main() {
-    std::cout << "\n\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n";
+    std::cout << "\n\033[1;34m\033[0m\n";
     std::cout << "\033[1;34m  nanoMoE :: BlockAllocator CPU Benchmark\033[0m\n";
-    std::cout << "\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n";
+    std::cout << "\033[1;34m\033[0m\n";
 
     bench_single_threaded_throughput();
     bench_latency_percentiles();
     bench_throughput_scaling();
 
-    std::cout << "\n\033[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n";
+    std::cout << "\n\033[1;34m\033[0m\n\n";
     return 0;
 }
